@@ -17,14 +17,15 @@ import {
   doc,
   increment,
   deleteField,
-  arrayUnion
+  arrayUnion,
+  deleteDoc
 } from 'firebase/firestore';
 import { 
   Send, Clock, Sparkles, Zap, 
   X, Smile, RefreshCw,
   Palette, Droplets, Coffee, 
   Check, Star, Flame, Skull, Heart, Ghost, Edit3, StickyNote, Info, ImageOff, AlertTriangle, ListFilter, Plus,
-  Volume2, VolumeX
+  Volume2, VolumeX, ShieldAlert, Trophy
 } from 'lucide-react';
 
 // --- 1. FIREBASE CONFIGURATION ---
@@ -46,6 +47,9 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'tea-confessions-v1';
+
+// --- CONSTANTS ---
+const EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 // --- ULTIMATE REALISTIC SOUND ENGINE ---
 const playSound = (type, isMuted) => {
@@ -203,10 +207,10 @@ const REACTION_TYPES = [
 ];
 
 const RANKS = [
-  { title: 'NPC', minXP: 0, maxXP: 49, emoji: '🤖' },
-  { title: 'Lurker', minXP: 50, maxXP: 149, emoji: '👀' },
-  { title: 'Main Character', minXP: 150, maxXP: 499, emoji: '✨' },
-  { title: 'Tea God', minXP: 500, maxXP: Infinity, emoji: '👑' }
+  { title: 'NPC', minXP: 0, maxXP: 49, emoji: '🤖', desc: 'Standard civilian. Just here for the side-quests.' },
+  { title: 'Lurker', minXP: 50, maxXP: 149, emoji: '👀', desc: 'Expert observer. You see the tea before it boils.' },
+  { title: 'Main Character', minXP: 150, maxXP: 499, emoji: '✨', desc: 'The plot revolves around you. Unstoppable energy.' },
+  { title: 'Tea God', minXP: 500, maxXP: Infinity, emoji: '👑', desc: 'Omniscient brewer. You define the meta.' }
 ];
 
 const EMOJI_CATEGORIES = {
@@ -224,7 +228,7 @@ const generateIdentity = () => {
 const getExpiryTime = (createdAt) => {
   if (!createdAt) return '24h 00m';
   const createdDate = createdAt.toDate ? createdAt.toDate() : new Date(createdAt);
-  const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+  const expiryDate = new Date(createdDate.getTime() + EXPIRY_MS);
   const diff = expiryDate.getTime() - Date.now();
   if (diff <= 0) return 'EXPIRED';
   const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -244,12 +248,12 @@ export default function App() {
   const [selectedVibe, setSelectedVibe] = useState(2); 
   const [currentTheme, setCurrentTheme] = useState('cyber');
   const [aura, setAura] = useState(0);
-  const [showRankTooltip, setShowRankTooltip] = useState(false);
   const [activePickerTab, setActivePickerTab] = useState('Vibes');
   const [isMuted, setIsMuted] = useState(false);
   const [isPollMode, setIsPollMode] = useState(false);
   const [pollOptions, setPollOptions] = useState(['', '']);
   const [selectedSticker, setSelectedSticker] = useState(null); 
+  const [showRankTooltip, setShowRankTooltip] = useState(false);
 
   const scrollRef = useRef(null);
   const endRef = useRef(null);
@@ -257,11 +261,8 @@ export default function App() {
   const currentRank = RANKS.find(r => aura >= r.minXP && aura <= r.maxXP) || RANKS[0];
   const activeVibe = POST_VIBES.find(v => v.id === selectedVibe) || POST_VIBES[2];
 
-  // Logic to track document counts to avoid "Sip" jumping
   const prevTeaCount = useRef(0);
   const prevSortBy = useRef(sortBy);
-
-  function handleInputChange(e) { setInput(e.target.value); }
 
   function performScrolling(behavior = 'smooth') {
     if (!endRef.current || !scrollRef.current) return;
@@ -270,11 +271,6 @@ export default function App() {
     } else {
       scrollRef.current.scrollTo({ top: 0, behavior });
     }
-  }
-
-  function handleVibeClick(vibeId) {
-    setSelectedVibe(vibeId);
-    playSound('vibe', isMuted);
   }
 
   useEffect(() => {
@@ -295,35 +291,51 @@ export default function App() {
     if (!user) return;
     const teaCollection = collection(db, 'artifacts', appId, 'public', 'data', 'confessions');
     const unsubscribe = onSnapshot(query(teaCollection), (snapshot) => {
-      let teaData = snapshot.docs.map(doc => {
-        const data = doc.data();
-        const totalReactions = Object.values(data.reactions || {}).reduce((a, b) => a + b, 0);
-        return { id: doc.id, ...data, hypeScore: (data.sips || 0) + (totalReactions * 2) };
+      const now = Date.now();
+      
+      let teaData = snapshot.docs
+        .map(docSnap => {
+          const data = docSnap.data();
+          const totalReactions = Object.values(data.reactions || {}).reduce((a, b) => a + b, 0);
+          const createdAt = data.createdAt?.toMillis ? data.createdAt.toMillis() : now;
+          
+          return { 
+            id: docSnap.id, 
+            ...data, 
+            createdAtMs: createdAt,
+            hypeScore: (data.sips || 0) + (totalReactions * 2) 
+          };
+        })
+        .filter(item => (now - item.createdAtMs) < EXPIRY_MS);
+
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        if (data.createdAt) {
+          const createdAt = data.createdAt.toMillis();
+          if (now - createdAt > EXPIRY_MS) {
+            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'confessions', docSnap.id));
+          }
+        }
       });
 
       if (sortBy === 'hot') {
         teaData = teaData.sort((a, b) => b.hypeScore - a.hypeScore);
       } else {
-        teaData = teaData.sort((a, b) => {
-          const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : Date.now();
-          const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : Date.now();
-          return tA - tB; 
-        });
+        teaData = teaData.sort((a, b) => a.createdAtMs - b.createdAtMs);
       }
       
-      const isNewMessage = snapshot.docs.length > prevTeaCount.current;
+      const isNewMessage = teaData.length > prevTeaCount.current;
       const hasSortChanged = sortBy !== prevSortBy.current;
 
       setTea(teaData);
 
-      // FIXED: Only scroll if a message was added OR sort mode changed manually
       if (isNewMessage || hasSortChanged) {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => performScrolling('smooth'));
         });
       }
       
-      prevTeaCount.current = snapshot.docs.length;
+      prevTeaCount.current = teaData.length;
       prevSortBy.current = sortBy;
     });
     return () => unsubscribe();
@@ -349,7 +361,6 @@ export default function App() {
         text: finalContent, sips: 0, createdAt: serverTimestamp(), authorId: user.uid, identity: String(userIdentity), style: selectedVibe, reactions: {}, userReactions: {}, sippedBy: [], poll: pollData
       });
       setInput(''); setSelectedSticker(null); setPollOptions(['', '']); setIsPollMode(false); setAura(a => a + 25); setShowEmojiPicker(false);
-      // Force scroll on manual post
       setTimeout(() => performScrolling('auto'), 10);
     } catch (e) { console.error(e); } finally { setIsSpilling(false); }
   }
@@ -399,7 +410,7 @@ export default function App() {
       <div className={`absolute inset-0 z-0 bg-gradient-to-br ${theme.bg} ${theme.img ? 'opacity-85' : 'opacity-100'}`}></div>
       
       <div className="relative z-10 flex flex-col h-full max-w-lg mx-auto bg-black/40 backdrop-blur-3xl border-x-2 border-white/5 shadow-2xl">
-        <header className="px-4 py-4 border-b-2 border-white/10 bg-black/30 shrink-0 overflow-visible">
+        <header className="px-4 py-4 border-b-2 border-white/10 bg-black/30 shrink-0 overflow-visible relative">
           <div className="flex items-center justify-between gap-4">
             <div className="relative group cursor-pointer flex-shrink-0 pt-2">
               <div className="absolute -inset-1 bg-yellow-400 -rotate-3 rounded-sm opacity-80 group-hover:rotate-3 transition-transform"></div>
@@ -425,10 +436,55 @@ export default function App() {
                   </button>
                   <div className="bg-white text-black px-2 py-0.5 skew-x-[-15deg] text-[9px] font-black uppercase tracking-tighter shadow-lg italic">AURA // {aura}XP</div>
                 </div>
-                <div className="flex items-center gap-2 relative">
+                <div className="flex items-center gap-2">
                   <div className="text-[9px] font-black text-white/40 uppercase tracking-widest bg-white/5 px-1.5 py-0.5 rounded-md border border-white/5 animate-pulse">{theme.name}</div>
-                  <div className="px-2 py-0.5 bg-black/50 text-white rounded-full text-[9px] font-bold border border-white/20 flex items-center gap-1 cursor-help transition-all hover:border-white select-none z-[60]">
-                    {String(currentRank.emoji)} {String(currentRank.title)}
+                  <div 
+                    onMouseEnter={() => setShowRankTooltip(true)}
+                    onMouseLeave={() => setShowRankTooltip(false)}
+                    className="relative"
+                  >
+                    {/* TRIGGER BADGE */}
+                    <div className="px-2 py-0.5 bg-black/50 text-white rounded-full text-[9px] font-bold border border-white/20 flex items-center gap-1 cursor-help transition-all hover:border-white select-none relative z-50">
+                      {String(currentRank.emoji)} {String(currentRank.title)}
+                    </div>
+
+                    {/* TOOLTIP CONTAINER: pt-2 acts as a 'bridge' to keep hover state active */}
+                    {showRankTooltip && (
+                      <div className="absolute right-0 top-full pt-2 w-56 z-[100] animate-in fade-in zoom-in-95 duration-200">
+                         <div className="bg-black/95 border-2 border-white/20 p-4 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.8)] backdrop-blur-2xl">
+                           <div className="text-[10px] font-black text-[#ccff00] mb-3 uppercase tracking-widest border-b border-white/10 pb-2 flex items-center justify-between">
+                             <div className="flex items-center gap-1.5"><ShieldAlert size={12} /> RANK SYSTEM</div>
+                             <Trophy size={12} className="text-white/20" />
+                           </div>
+                           <div className="space-y-3">
+                             {RANKS.map(r => (
+                               <div key={r.title} className={`flex flex-col gap-1 transition-all ${currentRank.title === r.title ? 'opacity-100 scale-100' : 'opacity-30 scale-[0.98]'}`}>
+                                 <div className="flex items-center justify-between">
+                                   <span className="text-[10px] font-black uppercase tracking-tight flex items-center gap-1">
+                                     {r.emoji} {r.title}
+                                     {currentRank.title === r.title && <Zap size={8} className="text-[#ccff00] fill-[#ccff00]" />}
+                                   </span>
+                                   <span className="text-[9px] font-mono font-bold">{r.minXP}+ XP</span>
+                                 </div>
+                                 <p className="text-[8px] leading-relaxed text-white/60 font-medium italic pr-2">{r.desc}</p>
+                               </div>
+                             ))}
+                           </div>
+                           <div className="mt-4 pt-3 border-t border-white/10">
+                              <div className="flex justify-between items-center mb-1.5">
+                                <span className="text-[8px] font-black text-white/40 uppercase tracking-tighter">PROGRESSION METER</span>
+                                <span className="text-[10px] font-black italic text-[#ccff00]">{aura} XP</span>
+                              </div>
+                              <div className="w-full h-1.5 bg-white/5 rounded-full overflow-hidden border border-white/5 p-[1px]">
+                                 <div 
+                                   className="h-full bg-gradient-to-r from-green-400 to-[#ccff00] transition-all duration-1000 rounded-full" 
+                                   style={{ width: `${Math.min(100, (aura / (currentRank.maxXP === Infinity ? aura : currentRank.maxXP + 1)) * 100)}%` }}
+                                 />
+                              </div>
+                           </div>
+                         </div>
+                      </div>
+                    )}
                   </div>
                 </div>
             </div>
@@ -499,7 +555,7 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-1 bg-white/5 px-2 py-1 rounded-lg border border-white/10">
                     <span className="text-[7px] font-black text-white/30 uppercase mr-1">Vibe</span>
-                    {POST_VIBES.map((v) => <button key={v.id} onClick={() => handleVibeClick(v.id)} className={`w-3.5 h-3.5 border-2 rounded-full transition-all hover:scale-125 ${selectedVibe === v.id ? `${v.color} border-white scale-110 ${v.glow}` : 'bg-transparent border-white/10'}`} />)}
+                    {POST_VIBES.map((v) => <button key={v.id} onClick={() => { setSelectedVibe(v.id); playSound('vibe', isMuted); }} className={`w-3.5 h-3.5 border-2 rounded-full transition-all hover:scale-125 ${selectedVibe === v.id ? `${v.color} border-white scale-110 ${v.glow}` : 'bg-transparent border-white/10'}`} />)}
                 </div>
              </div>
           </div>
@@ -512,7 +568,7 @@ export default function App() {
                 </div>
                 <div className="flex-1 flex items-center min-w-0">
                   {selectedSticker && <div className="relative shrink-0 flex items-center mr-1"><img src={selectedSticker} alt="preview" className="h-8 w-auto max-w-[50px] object-contain rounded animate-in zoom-in duration-300" /><button type="button" onClick={() => setSelectedSticker(null)} className="absolute -top-1 -right-1 bg-red-500 rounded-full p-0.5 text-white shadow-lg z-10"><X size={8} /></button></div>}
-                  <input value={input} onChange={handleInputChange} placeholder={selectedSticker ? "" : "WHAT'S THE TEA?"} className={`flex-1 bg-transparent border-none ${activeVibe.textColor} focus:outline-none font-bold text-[14px] py-2 placeholder-white/5 font-sans uppercase min-w-[50px] ${selectedSticker ? 'pl-1' : 'px-1.5'}`} />
+                  <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={selectedSticker ? "" : "WHAT'S THE TEA?"} className={`flex-1 bg-transparent border-none ${activeVibe.textColor} focus:outline-none font-bold text-[14px] py-2 placeholder-white/5 font-sans uppercase min-w-[50px] ${selectedSticker ? 'pl-1' : 'px-1.5'}`} />
                 </div>
                 <button 
                   type="submit" 
@@ -559,7 +615,8 @@ export default function App() {
   );
 }
 
-function TeaCard({ msg, currentUid, onSip, onReact, onVote, currentTheme, isMuted }) {
+// Memoized TeaCard to prevent unnecessary entry animations during parent state changes
+const TeaCard = React.memo(({ msg, currentUid, onSip, onReact, onVote, currentTheme, isMuted }) => {
   const [showVibeMenu, setShowVibeMenu] = useState(false);
   const [loadError, setLoadError] = useState({});
   const [expiryText, setExpiryText] = useState(getExpiryTime(msg.createdAt));
@@ -573,7 +630,7 @@ function TeaCard({ msg, currentUid, onSip, onReact, onVote, currentTheme, isMute
   const spiceLevel = Math.min(Math.max(Math.floor(((Number(msg.sips) || 0) + (totalR * 2)) / 5) + 1, 1), 5);
 
   useEffect(() => {
-    const timer = setInterval(() => { setExpiryText(getExpiryTime(msg.createdAt)); }, 60000);
+    const timer = setInterval(() => { setExpiryText(getExpiryTime(msg.createdAt)); }, 10000);
     return () => clearInterval(timer);
   }, [msg.createdAt]);
 
@@ -645,4 +702,4 @@ function TeaCard({ msg, currentUid, onSip, onReact, onVote, currentTheme, isMute
       </div>
     </div>
   );
-}
+});
